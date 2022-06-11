@@ -1,0 +1,444 @@
+---
+title: "Final Project"
+author: "Coby Eshaghian"
+date: '2022-05-11'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Introduction
+Here, we're looking at developing a model for predicting home prices in Sacramento. The data we're using is from a dataset in R, which examines 900+ home sales in Sacramento over a 5-day span. We'll start off by loading our packages.
+
+NOTE: Data citation: We are pulling this data from the *caret* library, which compiled this data from the Sacramento Bee newspaper
+
+```{r}
+library(ISLR)
+library(ISLR2)
+library(tidyverse)
+library(tidymodels)
+library(readr)
+library(discrim)
+library(tune)
+tidymodels_prefer()
+```
+
+
+### Purpose
+Through our models, we can examine which factors are most influential in determining the same price. However, it is important to note that this data was compiled before the 
+
+### About/Loading Data
+As mentioned above, the data we're using is from a 5-day span of sales in the Sacramento area in May 2008. This gives a few benefits. First, the housing market is largely dependent on macroeconomic factors. Hence, by isolating our data to such a short window, we eliminate most macroeconomic factors that would influence our model. On the other hand, it would've been nice to have a large data set over multiple years, as we would've been able to analyze the effect of time relative to price. However, if that were the case, we would've struggled to use a linear regression for data from 2005-2015, given the Great Financial Crisis caused housing prices to form a V-shape (rise, then decline, then recovery), whereas a MLR would've succeeded in looking at homes from 2012-2022 (given their steady appreciation in value). In our case, we are in the middle of the decline, where housing in Sacramento bottomed out around Q1 2012. 
+
+Thankfully, this data has already been cleaned up, so we don't have any missing or null data. However, we do have a letter "z" in front of the zip code, which we want to remove.
+
+```{r}
+library(caret)
+data("Sacramento")
+sac <- Sacramento
+
+head(sac)
+summary(sac)
+nrow(sac)
+```
+Above is a summary of the data, prior to cleanup.
+
+```{r}
+
+sac$zip<-gsub("z","",as.character(sac$zip))
+
+sac$zip <- as.numeric(as.character(sac$zip))
+
+sac <- subset(sac, select = -c(zip,latitude,longitude))
+
+head(sac)
+```
+
+
+We are pulling this data from the *caret* library, which compiled this data from the Sacramento Bee newspaper. Below are the following factors we are examining:
+
+* zip: 5 digit zip code that will allow us to subgroup specific areas in Sacramento
+* beds: Number of bedrooms in the dwelling
+* baths: Number of bathrooms in the dwelling
+* sqft: Net Rentable Square Feet
+* type: Qualitative factor that could be of the following values: Residential, Condo, and Multi-Family
+* price: Sale price of dwelling
+* latitiude: Latitidude Coordinates
+* longititude: Longitude Coordinates
+
+
+We won't be using city, given we're already using zip code, which is asserted in City. However, there are a handful of cities in this dataset. Additionally, latitude and longitude won't be necessary.
+
+### Data Split
+
+We're splitting the data with 80/20 training/testing. Additionally, we're stratifying our data by training data by type.
+
+We will also do k-folding to further analyze the accuracy of our model (more on this later)
+```{r}
+set.seed(1999)
+
+sac_split <- initial_split(sac, prop = 0.80,
+                                strata = price)
+sac_train <- training(sac_split)
+sac_test <- testing(sac_split)
+
+sac_fold <- vfold_cv(sac_train, strata = type, v = 5)
+```
+
+
+### Exploratory Data Analaysis
+
+First and foremost, I think we should examine our data and see how it's organized.
+
+```{r}
+ggplot(sac, aes(x=reorder(type,type,function(x)-length(x)))) +
+  geom_bar() +
+  labs(
+    title = "Types of Homes",
+    x = "Dwelling Type",
+    y = "Count"
+  ) +
+  # We want to be able to read labels better
+  coord_flip()
+
+```
+
+As we can see, most of the sales we're examining in this period are residential. This is largely in line with what we'd expect, given the real estate makeup of the Sacramento area. 
+
+
+```{r}
+ggplot(sac, aes(beds)) +
+  geom_bar() +
+  labs(
+    title = "Count of Bedrooms",
+    x = "# of Bedrooms",
+    y = "Count"
+  ) +
+  # We want to be able to read labels better
+  coord_flip()
+```
+As we can see, most of the dwellings we're looking at are 3 bedrooms...
+
+```{r}
+ggplot(sac, aes(sqft)) +
+  geom_histogram(bins = 100, color = "white") +
+  labs(
+    title = "Square Footage"
+  )
+
+med <- median(sac$sqft)
+mn <- mean(sac$sqft)
+
+print(paste("The Mean Is", med))
+print(paste("The Median Is", round(mn,0)))
+```
+Lastly, we can see that majority of the sales are for homes between one to two thousand square feet. When we do our mean function, it looks like it's greater than the median, meaning it is positively skewed. 
+
+```{r}
+ggplot(sac, aes(reorder(city, price), price)) +
+  geom_boxplot(varwidth = TRUE) + 
+  coord_flip() +
+  labs(
+    title = "Variability in Home Price by City",
+    x = "city"
+  )
+```
+Here, we can see places like Sacramento have much variability in price, whereas North Highlands do not.This may be explained by the higher volume of sales in Sacramento compared to other areas. Let's see if our plot below confirms...
+
+
+```{r}
+ggplot(sac, aes(city)) +
+  geom_bar() +
+  labs(
+    title = "Count of Home Sales",
+    x = "City",
+    y = "Count"
+  ) +
+  # We want to be able to read labels better
+  coord_flip()
+
+```
+As we can see, Sacramento outnumbers the other cities by a factor of at least 4-to-1, sometimes 100-to-1...
+
+
+```{r}
+sac %>%
+  ggplot() + 
+    geom_boxplot(mapping=aes(x = city, y = sqft, fill = type))
+```
+
+
+```{r}
+ggplot(sac, aes(reorder(type, sqft), sqft)) +
+  geom_boxplot(varwidth = TRUE) + 
+  coord_flip() +
+  labs(
+    title = "Variability in Square Footage by Type",
+    x = "Type"
+  )
+```
+As we can see, multifamily has a higher bound, but most of our data is concentarated in residential, from 1.2k to 2k sqft. Now, let's jump into analysis. 
+
+
+Here's some analysis on the variables themselves...
+
+```{r}
+library(corrplot)
+
+sac %>% 
+  select(is.numeric) %>% 
+  cor() %>% 
+  corrplot(type = "lower")
+```
+
+As expected, we'd expect all these things to be positively correlated, such as more sqft = higher price = more beds = more baths. However, I'm surprised this isn't a stronger relationship between beds and price. Just a personal observation, that may not surprise someone else. 
+
+
+### Analysis
+
+First and foremost, let's establish what we're trying to predict. We will do two experiments with two hypothesis. First, let's build a model to with price as our response variable, and the other factors as our predictor. We will then analyze which model fits best, as well as test its accuracy against our training data.
+
+```{r}
+sacrec <- recipe(price ~ ., data = sac_train) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_center(all_numeric_predictors()) %>%
+  step_scale((all_numeric_predictors()))
+```
+
+```{r}
+lm_model <- linear_reg() %>% 
+  set_engine("lm")
+```
+
+```{r}
+lm_wflow <- workflow() %>% 
+  add_recipe(sacrec) %>% 
+  add_model(lm_model) 
+
+sac_fit <- fit(lm_wflow, sac_train)
+```
+
+
+```{r}
+multi_metric <- metric_set(rmse, rsq, mae)
+price_predict <- predict(sac_fit, sac_train) %>% 
+  bind_cols(sac_train %>% select(price))
+
+multi_metric(price_predict, truth = price, estimate = .pred)
+```
+
+As we can see, we have a RSQ of roughly 73%, which is pretty decent. In other words, 73% of the variance is explained by our variables. This is a figure I'm pretty satisfied with. However, we can look at some other diagnostics in our model...
+
+```{r}
+lm_fit2 <- lm_model %>% 
+          fit(price ~ ., data = sac_train)
+
+par(mfrow=c(2,2)) # plot all 4 plots in one
+
+plot(lm_fit2$fit, 
+     pch = 0,  
+     col = '#006EA1')
+```
+
+Now, let's run some classification models. The first one we're going to run is going to try to predict the type of home 
+
+```{r}
+library(MASS)
+library(discrim)
+
+sacrec2 <- recipe(type~., data = sac_train) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_center(all_numeric_predictors()) %>%
+  step_scale((all_numeric_predictors()))
+  
+log_model <- logistic_reg() %>% 
+  set_mode("classification") %>% 
+  set_engine("glm")
+
+log_wkflow <- workflow() %>% 
+  add_model(log_model) %>% 
+  add_recipe(sacrec2)
+
+lda_mod <- discrim_linear() %>% 
+  set_mode("classification") %>% 
+  set_engine("MASS")
+
+lda_wkflow <- workflow() %>% 
+  add_model(lda_mod) %>% 
+  add_recipe(sacrec2)
+
+qda_mod <- discrim_quad() %>% 
+  set_mode("classification") %>% 
+  set_engine("MASS")
+
+qda_wkflow <- workflow() %>% 
+  add_model(qda_mod) %>% 
+  add_recipe(sacrec2)
+
+```
+
+```{r}
+
+control <- control_resamples(save_pred = TRUE)
+
+log_fit <- fit_resamples(log_wkflow, sac_fold)
+
+lda_fit <- fit_resamples(lda_wkflow, sac_fold)
+
+qda_fit <- fit_resamples(qda_wkflow, resamples = sac_fold)
+```
+
+Here, we see all of our mdoels failed. To this, we can look back at our EDA. The two possible classificaiton models could be predicitng city and type of sale (Residential, multifamily, condo). However, our data is extremely skewed, so much so that there's not enough data to pull the folds to analyze the other cities and types of condos. This is a pitfall of our dataset in which it is not possible to analyze. As we can see, majority of our dataset is residential in Sacramento. As it says, "some group is too small for.. To check...
+
+```{r}
+sacres <- sum(sac$city == 'SACRAMENTO'  & sac$type=='Residential', na.rm=TRUE)
+sacres_portion <- sacres/nrow(sac)
+sacres_portion
+```
+A staggering 43% of our data is simply residential homes in Sacramento. This explains why we are having trouble building classifaction models with such limited data on other classes. 
+
+Going back to what we can work on... 
+
+We can run classification models on the square footage, to assess the size of the properties based on price, beds, baths, city, and type...
+
+```{r}
+sacrec3 <- recipe(sqft ~ ., data = sac_train) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_center(all_numeric_predictors()) %>%
+  step_scale((all_numeric_predictors()))
+
+lm_wflow2 <- workflow() %>% 
+  add_recipe(sacrec3) %>% 
+  add_model(lm_model) 
+
+sac_fit2 <- fit(lm_wflow2, sac_train)
+```
+
+```{r}
+multi_metric <- metric_set(rmse, rsq, mae)
+sqft_predict <- predict(sac_fit2, sac_train) %>% 
+  bind_cols(sac_train %>% select(sqft))
+
+multi_metric(sqft_predict, truth = sqft, estimate = .pred)
+```
+Here, we get an even higher rsq of 83%. As I did for the other plot, here's some visuals...
+
+```{r}
+lm_fit3 <- lm_model %>% 
+          fit(sqft ~ ., data = sac_train)
+
+par(mfrow=c(2,2)) # plot all 4 plots in one
+
+plot(lm_fit3$fit, 
+     pch = 0,  
+     col = '#006EA1')
+```
+
+Lastly, we can attempt to build a classification model, based on the bedroom size. Since it's discrete and there's a wide variety, we can turn it into a factor and attempt to run classification models, in a last ditch effort. 
+
+```{r}
+sac2 <- sac
+
+sac2$beds=as.factor(sac2$beds)
+sac2$baths=as.factor(sac2$baths)
+```
+Here, we turned both beds and baths into factors. Now, we will reseed and split the data.
+
+```{r}
+set.seed(2002)
+
+sac_split2 <- initial_split(sac2, prop = 0.80,
+                                strata = type)
+sac_train2 <- training(sac_split2)
+sac_test2 <- testing(sac_split2)
+
+sac_fold2 <- vfold_cv(sac_train2, strata = type, v = 5)
+```
+Now, we can begin our entire process from earlier, all over again...
+
+```{r}
+sacrec4 <- recipe(beds~., data = sac_train2) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_center(all_numeric_predictors()) %>%
+  step_scale((all_numeric_predictors()))
+  
+log_model <- logistic_reg() %>% 
+  set_mode("classification") %>% 
+  set_engine("glm")
+
+log_wkflow2 <- workflow() %>% 
+  add_model(log_model) %>% 
+  add_recipe(sacrec4)
+
+lda_mod <- discrim_linear() %>% 
+  set_mode("classification") %>% 
+  set_engine("MASS")
+
+lda_wkflow2 <- workflow() %>% 
+  add_model(lda_mod) %>% 
+  add_recipe(sacrec4)
+
+qda_mod <- discrim_quad() %>% 
+  set_mode("classification") %>% 
+  set_engine("MASS")
+
+qda_wkflow2 <- workflow() %>% 
+  add_model(qda_mod) %>% 
+  add_recipe(sacrec4)
+```
+
+```{r}
+control <- control_resamples(save_pred = TRUE)
+
+log_fit <- fit_resamples(log_wkflow2, sac_fold)
+
+lda_fit <- fit_resamples(lda_wkflow2, sac_fold, control = control)
+
+qda_fit <- fit_resamples(qda_wkflow2, resamples = sac_fold2)
+```
+
+We encounter a similar situation here, where our data isn't spread enough for a qda model. We see all our models failed. Hence, we can just try more lin. regression...
+
+```{r}
+sacrec5 <- recipe(beds~., data = sac_train) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_center(all_numeric_predictors()) %>%
+  step_scale((all_numeric_predictors()))
+
+```
+
+```{r}
+lm_wflow3 <- workflow() %>% 
+  add_recipe(sacrec5) %>% 
+  add_model(lm_model) 
+
+sac_fit3 <- fit(lm_wflow3, sac_train)
+
+multi_metric <- metric_set(rmse, rsq, mae)
+beds_predict <- predict(sac_fit3, sac_train) %>% 
+  bind_cols(sac_train %>% select(beds))
+
+multi_metric(beds_predict, truth = beds, estimate = .pred)
+```
+Here, we see our model performed somewhat poorly compared to our other regression models in predicting sqft and price. Nevertheless, 65% is something to be satisfied with.
+
+Similar to my above LM's, below are some more diagnostics...
+
+```{r}
+lm_fit4 <- lm_model %>% 
+          fit(beds ~ ., data = sac_train)
+
+par(mfrow=c(2,2)) # plot all 4 plots in one
+
+plot(lm_fit4$fit, 
+     pch = 0,  
+     col = '#006EA1')
+```
+
+### Conclusion
+
+In concluson, we can see the strengths and weaknesses of our dataset. Becauase of the lack of diversity in sales over this 5 day period, we can see how our classification models didn't run as we would've liked them too. Our data was very heavy in the Sacramento, Residential category, so much so that it made it impossible to analyze both city and type in a classification setting. Obviously, in hindsight, it would've been nice for both my project and my grade, and I'll likely be penalized for not including any classifications. Nevertheless, I think the EDA pointed out some really interesting patterns and points about my data set, regarding the distributions of how the different cities were, the square footage makeup of the dataset, and how each city had its out price range. Additionally, in all 3 linear regression models, we saw rsq's of 60%+, which gives me confidence in our model without too much overfitting. Nonetheless, I found it fun to analyze this data, given my passion for real estate and economics (due to the timing of the data collection during the Great Financial Crisis). 
+
+
